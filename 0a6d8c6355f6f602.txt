@@ -1,0 +1,400 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local VirtualUser = game:GetService("VirtualUser")
+
+local LocalPlayer = Players.LocalPlayer
+local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
+
+LocalPlayer.CharacterAdded:Connect(function(newCharacter)
+    Character = newCharacter
+    HumanoidRootPart = newCharacter:WaitForChild("HumanoidRootPart")
+end)
+
+local Config = {
+    BossRadius = 21,
+    RotationSpeed = 3.1,
+    HeightOffset = 5,
+    MinRadius = 8,
+    MaxRadius = 35,
+    MaxSpeed = 30,
+    MinSpeed = 2
+}
+
+local isFarming = false
+local isShowingHealth = false
+local isCollectingItems = false
+local isRotating = false
+local currentBoss = nil
+local nearestBoss = nil
+local isMoving = false
+local rotationAngle = 0
+local activeTween = nil
+
+local BOSS_CENTER = Vector3.new(-2572, 277, -1375)
+
+local UI_COLORS = {
+    Background = Color3.fromRGB(0, 0, 0),
+    Text = Color3.fromRGB(255, 255, 255),
+    Warning = Color3.fromRGB(255, 0, 0),
+    Button = Color3.fromRGB(20, 20, 20),
+    CloseButton = Color3.fromRGB(255, 100, 100)
+}
+
+local function findNearestBoss()
+    local bossFolder = workspace:FindFirstChild("GiangHo2")
+    if bossFolder then
+        bossFolder = bossFolder:FindFirstChild("NPCs")
+    end
+    
+    if not bossFolder then
+        return nil
+    end
+    
+    local minDistance = math.huge
+    local nearest = nil
+    
+    for _, npc in ipairs(bossFolder:GetChildren()) do
+        if npc:IsA("Model") then
+            local humanoid = npc:FindFirstChild("Humanoid")
+            local rootPart = npc:FindFirstChild("HumanoidRootPart")
+            
+            if humanoid and rootPart and humanoid.Health > 0 then
+                local distance = (HumanoidRootPart.Position - rootPart.Position).Magnitude
+                if distance < minDistance then
+                    minDistance = distance
+                    nearest = npc
+                end
+            end
+        end
+    end
+    
+    return nearest
+end
+
+local function startOrbitMovement()
+    if HumanoidRootPart and not isMoving then
+        isMoving = true
+        
+        local direction = HumanoidRootPart.Position - BOSS_CENTER
+        local directionXZ = Vector3.new(direction.X, 0, direction.Z).Unit
+        
+        if directionXZ.Magnitude == 0 then
+            directionXZ = Vector3.new(1, 0, 0)
+        end
+        
+        local targetPosition = BOSS_CENTER + directionXZ * Config.BossRadius + Vector3.new(0, Config.HeightOffset, 0)
+        
+        local tween = TweenService:Create(
+            HumanoidRootPart,
+            TweenInfo.new(1.2, Enum.EasingStyle.Sine, Enum.EasingDirection.Out),
+            {CFrame = CFrame.new(targetPosition, BOSS_CENTER)}
+        )
+        
+        tween:Play()
+        tween.Completed:Connect(function()
+            rotationAngle = math.atan2(directionXZ.Z, directionXZ.X)
+            isRotating = true
+            isMoving = false
+        end)
+    end
+end
+
+local function setupAutoAttack()
+    coroutine.wrap(function()
+        while true do
+            repeat
+                task.wait(0.1)
+            until isFarming
+            
+            local tool = Character:FindFirstChildOfClass("Tool")
+            if tool then
+                pcall(function()
+                    tool:Activate()
+                end)
+            end
+        end
+    end)()
+end
+
+RunService.RenderStepped:Connect(function(deltaTime)
+    if isRotating and HumanoidRootPart then
+        rotationAngle = rotationAngle + math.rad(360) / Config.RotationSpeed * deltaTime
+        
+        local xOffset = math.cos(rotationAngle) * Config.BossRadius
+        local zOffset = math.sin(rotationAngle) * Config.BossRadius
+        local targetPosition = BOSS_CENTER + Vector3.new(xOffset, Config.HeightOffset, zOffset)
+        
+        if activeTween then
+            activeTween:Cancel()
+        end
+        
+        activeTween = TweenService:Create(
+            HumanoidRootPart,
+            TweenInfo.new(0.08, Enum.EasingStyle.Sine, Enum.EasingDirection.Out),
+            {CFrame = CFrame.new(targetPosition, BOSS_CENTER)}
+        )
+        activeTween:Play()
+    end
+end)
+
+RunService.RenderStepped:Connect(function()
+    if isFarming then
+        local boss = findNearestBoss()
+        if boss and boss:FindFirstChild("Humanoid") and boss.Humanoid.Health > 0 then
+            nearestBoss = boss
+        end
+        
+        if nearestBoss and nearestBoss:FindFirstChild("HumanoidRootPart") then
+            local bossPosition = nearestBoss.HumanoidRootPart.Position
+            local playerPosition = HumanoidRootPart.Position
+            local _, yRotation = CFrame.new(playerPosition, bossPosition):ToEulerAnglesYXZ()
+            
+            HumanoidRootPart.CFrame = CFrame.new(playerPosition) * CFrame.Angles(0, yRotation, 0)
+        end
+    end
+end)
+
+LocalPlayer.Idled:Connect(function()
+    VirtualUser:Button2Down(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+    task.wait(1)
+    VirtualUser:Button2Up(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+end)
+
+local function setupItemCollection()
+    task.spawn(function()
+        while true do
+            if isCollectingItems then
+                for _, descendant in ipairs(workspace:GetDescendants()) do
+                    if descendant:IsA("BasePart") and descendant:FindFirstChildOfClass("ProximityPrompt") then
+                        local prompt = descendant:FindFirstChildOfClass("ProximityPrompt")
+                        if (HumanoidRootPart.Position - descendant.Position).Magnitude < 50 then
+                            fireproximityprompt(prompt)
+                            task.wait(0.1)
+                        end
+                    end
+                end
+            end
+            task.wait(0.3)
+        end
+    end)
+end
+
+local function setupHealthDisplay(healthLabel)
+    coroutine.wrap(function()
+        while true do
+            if isShowingHealth then
+                local boss = findNearestBoss()
+                if boss and boss:FindFirstChildOfClass("Humanoid") then
+                    local currentHealth = math.floor(boss.Humanoid.Health)
+                    local maxHealth = math.floor(boss.Humanoid.MaxHealth)
+                    healthLabel.Text = boss.Name .. ": " .. currentHealth .. " / " .. maxHealth
+                else
+                    healthLabel.Text = "Khong tìm thấy boss"
+                end
+            else
+                healthLabel.Text = ""
+            end
+            task.wait(0.5)
+        end
+    end)()
+end
+
+local function createButton(parent, text)
+    local button = Instance.new("TextButton")
+    button.Text = text
+    button.Size = UDim2.new(1, 0, 0, 40)
+    button.BackgroundColor3 = UI_COLORS.Button
+    button.BackgroundTransparency = 0.2
+    button.TextColor3 = UI_COLORS.Text
+    button.Font = Enum.Font.GothamMedium
+    button.TextSize = 14
+    
+    local corner = Instance.new("UICorner", button)
+    corner.CornerRadius = UDim.new(0, 8)
+    
+    local stroke = Instance.new("UIStroke", button)
+    stroke.Thickness = 1.2
+    stroke.Color = Color3.fromRGB(200, 200, 200)
+    
+    return button
+end
+
+local function createMainUI()
+    local screenGui = Instance.new("ScreenGui", game.CoreGui)
+    screenGui.Name = "BossFarmGUI"
+    
+    local mainFrame = Instance.new("Frame", screenGui)
+    mainFrame.Position = UDim2.new(0.7, 0, 0.35, 0)
+    mainFrame.Size = UDim2.new(0, 300, 0, 410)
+    mainFrame.BackgroundColor3 = UI_COLORS.Background
+    mainFrame.BackgroundTransparency = 0.2
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Active = true
+    mainFrame.Draggable = true
+    
+    local corner = Instance.new("UICorner", mainFrame)
+    corner.CornerRadius = UDim.new(0, 12)
+    
+    local borderStroke = Instance.new("UIStroke", mainFrame)
+    borderStroke.Thickness = 2
+    borderStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    
+    coroutine.wrap(function()
+        while true do
+            for hue = 0, 1, 0.01 do
+                borderStroke.Color = Color3.fromHSV(hue, 1, 1)
+                task.wait()
+            end
+        end
+    end)()
+    
+    local titleLabel = Instance.new("TextLabel", mainFrame)
+    titleLabel.Text = "Uzmaki Hub"
+    titleLabel.Size = UDim2.new(1, 0, 0, 35)
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.TextColor3 = UI_COLORS.Text
+    titleLabel.Font = Enum.Font.FredokaOne
+    titleLabel.TextSize = 22
+    
+    local warningLabel = Instance.new("TextLabel", mainFrame)
+    warningLabel.Text = "Khuyên Không Dùng Phóng Lợn !"
+    warningLabel.Position = UDim2.new(0, 0, 0, 35)
+    warningLabel.Size = UDim2.new(1, 0, 0, 20)
+    warningLabel.BackgroundTransparency = 1
+    warningLabel.TextColor3 = UI_COLORS.Warning
+    warningLabel.Font = Enum.Font.Gotham
+    warningLabel.TextSize = 14
+    
+    local buttonContainer = Instance.new("Frame", mainFrame)
+    buttonContainer.Position = UDim2.new(0, 15, 0, 60)
+    buttonContainer.Size = UDim2.new(1, -30, 1, -70)
+    buttonContainer.BackgroundTransparency = 1
+    
+    local listLayout = Instance.new("UIListLayout", buttonContainer)
+    listLayout.FillDirection = Enum.FillDirection.Vertical
+    listLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    listLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+    listLayout.Padding = UDim.new(0, 10)
+    
+    local farmButton = createButton(buttonContainer, "Auto Farm Boss")
+    farmButton.MouseButton1Click:Connect(function()
+        isFarming = not isFarming
+        
+        if isFarming then
+            local boss = findNearestBoss()
+            if boss and boss:FindFirstChild("HumanoidRootPart") then
+                nearestBoss = boss
+                startOrbitMovement()
+                isRotating = true
+                farmButton.Text = "Đang Farm Boss"
+            else
+                isFarming = false
+                isRotating = false
+                farmButton.Text = "Auto Farm Boss"
+            end
+        else
+            nearestBoss = nil
+            isRotating = false
+            if activeTween then
+                activeTween:Cancel()
+                activeTween = nil
+            end
+            farmButton.Text = "Auto Farm Boss"
+        end
+    end)
+    farmButton.Parent = buttonContainer
+    
+    local healthButton = createButton(buttonContainer, "Hiện Thị Máu Boss")
+    healthButton.MouseButton1Click:Connect(function()
+        isShowingHealth = not isShowingHealth
+        healthButton.Text = isShowingHealth and "Đã Hiện Thị" or "Hiện Thị Máu Boss"
+    end)
+    healthButton.Parent = buttonContainer
+    
+    local collectButton = createButton(buttonContainer, "Auto Nhặt Vật Phẩm")
+    collectButton.MouseButton1Click:Connect(function()
+        isCollectingItems = not isCollectingItems
+        collectButton.Text = isCollectingItems and "Đang Auto Nhặt" or "Đã Nhặt Vật Phẩm"
+    end)
+    collectButton.Parent = buttonContainer
+    
+    local healthLabel = Instance.new("TextLabel", screenGui)
+    healthLabel.Size = UDim2.new(0, 400, 0, 30)
+    healthLabel.Position = UDim2.new(0.5, -200, 0, 10)
+    healthLabel.BackgroundTransparency = 0.3
+    healthLabel.BackgroundColor3 = UI_COLORS.Background
+    healthLabel.TextColor3 = UI_COLORS.Text
+    healthLabel.Font = Enum.Font.GothamBold
+    healthLabel.TextSize = 18
+    healthLabel.TextXAlignment = Enum.TextXAlignment.Center
+    
+    local healthCorner = Instance.new("UICorner", healthLabel)
+    healthCorner.CornerRadius = UDim.new(0, 6)
+    
+    local radiusLabel = createButton(buttonContainer, "Ban kinh: " .. tostring(Config.BossRadius))
+    radiusLabel.AutoButtonColor = false
+    radiusLabel.TextColor3 = UI_COLORS.Text
+    radiusLabel.BackgroundTransparency = 1
+    radiusLabel.Parent = buttonContainer
+    
+    local increaseRadius = createButton(buttonContainer, "Tăng Khoảng Cách")
+    increaseRadius.MouseButton1Click:Connect(function()
+        Config.BossRadius = math.min(Config.BossRadius + 1, Config.MaxRadius)
+        radiusLabel.Text = "Khoảng Cách: " .. tostring(Config.BossRadius)
+    end)
+    increaseRadius.Parent = buttonContainer
+    
+    local decreaseRadius = createButton(buttonContainer, "Giảm Khoảng Cách")
+    decreaseRadius.MouseButton1Click:Connect(function()
+        Config.BossRadius = math.max(Config.BossRadius - 1, Config.MinRadius)
+        radiusLabel.Text = "Khoảng Cách: " .. tostring(Config.BossRadius)
+    end)
+    decreaseRadius.Parent = buttonContainer
+    
+    local speedButton = createButton(buttonContainer, "Tốc Độ: " .. tostring(Config.RotationSpeed))
+    speedButton.MouseButton1Click:Connect(function()
+        Config.RotationSpeed = Config.RotationSpeed + 0.1
+        if Config.RotationSpeed > Config.MaxSpeed then
+            Config.RotationSpeed = Config.MinSpeed
+        end
+        speedButton.Text = "Tốc Độ: " .. tostring(Config.RotationSpeed)
+    end)
+    speedButton.Parent = buttonContainer
+    
+    local closeButton = Instance.new("TextButton", mainFrame)
+    closeButton.Text = "X"
+    closeButton.Position = UDim2.new(1, -35, 0, 5)
+    closeButton.Size = UDim2.new(0, 30, 0, 25)
+    closeButton.BackgroundColor3 = UI_COLORS.CloseButton
+    closeButton.TextColor3 = UI_COLORS.Text
+    closeButton.Font = Enum.Font.GothamBold
+    closeButton.TextSize = 14
+    
+    local closeCorner = Instance.new("UICorner", closeButton)
+    closeCorner.CornerRadius = UDim.new(0, 6)
+    
+    closeButton.MouseButton1Click:Connect(function()
+        screenGui:Destroy()
+    end)
+    
+    return screenGui, healthLabel
+end
+
+local function initialize()
+    repeat
+        task.wait()
+    until game:IsLoaded()
+    
+    setupAutoAttack()
+    setupItemCollection()
+    
+    local gui, healthLabel = createMainUI()
+    setupHealthDisplay(healthLabel)
+    
+    print("Anti AFK Đã Bật Thành Công")
+    print("Script Boss Farm Đã Bật")
+end
+
+initialize()
